@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: university-schedule-bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -u cloud.py
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: UNIVERSITY_USERNAME
+        sync: false
+      - key: UNIVERSITY_PASSWORD
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
