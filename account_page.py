@@ -9,7 +9,9 @@ from university import ScheduleError
 
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
+    # Обычный POST формы при no-referrer отправляет Origin: null.
+    # same-origin сохраняет проверку Origin и не передаёт ссылку другим сайтам.
+    "Referrer-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; "
