@@ -381,6 +381,7 @@ class CloudGroupsTests(unittest.IsolatedAsyncioTestCase):
             "RENDER_EXTERNAL_URL": "https://bot.example",
             "DATABASE_URL": "postgresql://fixture:fixture@ep-fixture.neon.tech/fixture",
             "CREDENTIALS_KEY": KEY,
+            "ADMIN_TELEGRAM_ID": "11",
         }
         with patch.dict(os.environ, environment, clear=True):
             settings = cloud.CloudSettings.from_env()
@@ -392,10 +393,13 @@ class CloudGroupsTests(unittest.IsolatedAsyncioTestCase):
         store.user_group.return_value = replace(GROUP, credentials=None, university_id=None)
         store.new_ticket.return_value = "fixture-ticket"
         with patch("cloud.Bot", return_value=bot), patch("cloud.Store", return_value=store), \
+                patch("cloud.create_router", wraps=create_router) as router_factory, \
                 patch.object(bot, "set_webhook", new_callable=AsyncMock) as webhook:
             client = TestClient(TestServer(cloud.create_app(settings)))
             try:
                 await client.start_server()
+                self.assertEqual(settings.admin_telegram_id, 11)
+                self.assertEqual(router_factory.call_args.args[1], 11)
                 store.initialize.assert_awaited_once()
                 self.assertEqual(set(webhook.await_args.kwargs["allowed_updates"]), {"message", "callback_query"})
                 self.assertEqual((await client.get("/health")).status, 200)
