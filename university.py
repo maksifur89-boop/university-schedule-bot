@@ -19,6 +19,17 @@ class ScheduleError(Exception):
     """Не удалось получить достоверное расписание."""
 
 
+class AccountError(ScheduleError):
+    """Сайт подтвердил, что аккаунт больше не даёт доступ к группе."""
+
+
+def normalize_group(value: str) -> str:
+    value = " ".join(value.split()).upper()
+    if not re.fullmatch(r"[\w][\w ./()-]{0,39}", value, re.UNICODE):
+        raise ValueError("Неверный номер группы.")
+    return value
+
+
 @dataclass(frozen=True)
 class Lesson:
     starts_at: str
@@ -36,12 +47,14 @@ def check_url(url: str) -> None:
 
 
 class UniversityClient:
-    def __init__(self, username: str, password: str) -> None:
+    def __init__(self, username: str, password: str, group_id: str = GROUP_ID) -> None:
         self.username = username
         self.password = password
         self.client = httpx.AsyncClient(timeout=30, follow_redirects=False)
         self.lock = asyncio.Lock()
         self.authenticated = False
+        self.group_id = group_id
+        self.groups: dict[str, str] = {}
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -97,6 +110,13 @@ class UniversityClient:
         for _ in range(8):
             soup = BeautifulSoup(response.text, "html.parser")
             if response.url.host == "idis.ieml.ru" and soup.select_one("#yearSelector"):
+                self.groups = {}
+                for button in soup.select(".gr-btn[data-groupid]"):
+                    identifier = button.get("data-groupid", "")
+                    if identifier.isdecimal():
+                        self.groups[normalize_group(button.get_text(" ", strip=True))] = identifier
+                if not self.groups:
+                    raise ScheduleError("Не удалось определить группы в кабинете вуза.")
                 self.authenticated = True
                 return
             form = next(
@@ -119,10 +139,18 @@ class UniversityClient:
                 if response.url.host != "idp.ieml.ru":
                     raise ScheduleError("Неожиданный адрес формы входа.")
                 if password_submitted:
-                    raise ScheduleError("Сайт отклонил логин или пароль от кабинета вуза.")
+                    raise AccountError("Сайт отклонил логин или пароль от кабинета вуза.")
                 password_submitted = True
             response = await self.submit_form(response, form)
         raise ScheduleError("Вход в кабинет не завершился. Проверь логин и пароль.")
+
+    async def available_groups(self) -> dict[str, str]:
+        async with self.lock:
+            try:
+                await self.login()
+                return dict(self.groups)
+            except (httpx.HTTPError, ValueError):
+                raise ScheduleError("Не удалось загрузить группы с сайта вуза.") from None
 
     async def get_day(self, day: date) -> list[Lesson]:
         schedule = await self.get_period(day, day)
@@ -135,10 +163,12 @@ class UniversityClient:
             try:
                 if not self.authenticated:
                     await self.login()
+                if self.group_id not in self.groups.values():
+                    raise AccountError("Этот аккаунт больше не связан с выбранной группой.")
                 parameters = {
                     "par_begindate": start.strftime("%d.%m.%Y"),
                     "par_enddate": end.strftime("%d.%m.%Y"),
-                    "par_groupid": GROUP_ID,
+                    "par_groupid": self.group_id,
                 }
                 url = str(httpx.URL(BASE_URL + "GenerateScheduleLessons", params=parameters))
                 response = await self.request(url)

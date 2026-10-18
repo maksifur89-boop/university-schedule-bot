@@ -10,9 +10,14 @@ from aiogram.types import Message
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from dotenv import load_dotenv
+from cryptography.fernet import Fernet
 
+from account_page import register_account_pages
+from group_service import GroupService
 from main import MAIN_KEYBOARD, PROJECT_DIR, format_day, router
+from multiuser import create_router
 from reminders import MorningReminders
+from storage import Store
 from university import UniversityClient
 
 
@@ -28,13 +33,27 @@ class CloudSettings:
     secret: str = field(repr=False)
     base_url: str
     port: int = 10000
+    database_url: str = field(default="", repr=False)
+    credentials_key: str = field(default="", repr=False)
 
     @classmethod
     def from_env(cls) -> "CloudSettings":
-        required = (
-            "BOT_TOKEN", "UNIVERSITY_USERNAME",
-            "UNIVERSITY_PASSWORD", "WEBHOOK_SECRET",
-        )
+        database_url = os.getenv("DATABASE_URL", "").strip()
+        credentials_key = os.getenv("CREDENTIALS_KEY", "").strip()
+        if bool(database_url) != bool(credentials_key):
+            raise SystemExit("Для групп нужны обе переменные: DATABASE_URL и CREDENTIALS_KEY.")
+        if database_url:
+            try:
+                database = urlsplit(database_url)
+                if (database.scheme not in ("postgres", "postgresql")
+                        or not database.hostname or not database.hostname.endswith(".neon.tech")):
+                    raise ValueError
+                Fernet(credentials_key.encode())
+            except (ValueError, UnicodeError):
+                raise SystemExit("Проверь DATABASE_URL и CREDENTIALS_KEY; значения не выводятся в журнал.") from None
+        required = ("BOT_TOKEN", "WEBHOOK_SECRET")
+        if not database_url:
+            required += ("UNIVERSITY_USERNAME", "UNIVERSITY_PASSWORD")
         values = {name: os.getenv(name, "") for name in required}
         missing = [name for name, value in values.items() if not value.strip()]
         if missing:
@@ -78,11 +97,13 @@ class CloudSettings:
 
         return cls(
             token=values["BOT_TOKEN"].strip(),
-            username=values["UNIVERSITY_USERNAME"],
-            password=values["UNIVERSITY_PASSWORD"],
+            username=values.get("UNIVERSITY_USERNAME", ""),
+            password=values.get("UNIVERSITY_PASSWORD", ""),
             secret=secret,
             base_url=base_url.rstrip("/"),
             port=port,
+            database_url=database_url,
+            credentials_key=credentials_key,
         )
 
 
@@ -124,24 +145,34 @@ async def health_handler(request: web.Request) -> web.Response:
 
 def create_app(settings: CloudSettings) -> web.Application:
     bot = Bot(token=settings.token)
-    schedule_client = UniversityClient(settings.username, settings.password)
-    reminders = MorningReminders(
-        bot=bot,
-        schedule_client=schedule_client,
-        formatter=format_day,
-        storage_path=PROJECT_DIR / "data" / "morning_subscribers.json",
-    )
     dispatcher = Dispatcher()
-    dispatcher.include_routers(cloud_commands, router)
-    dispatcher["schedule_client"] = schedule_client
-    dispatcher["reminders"] = reminders
+    schedule_client = None
+    service = None
+    if settings.database_url:
+        service = GroupService(Store(settings.database_url), settings.credentials_key, settings.base_url)
+        dispatcher.include_router(create_router(service))
+    else:
+        schedule_client = UniversityClient(settings.username, settings.password)
+        reminders = MorningReminders(
+            bot=bot,
+            schedule_client=schedule_client,
+            formatter=format_day,
+            storage_path=PROJECT_DIR / "data" / "morning_subscribers.json",
+        )
+        dispatcher.include_routers(cloud_commands, router)
+        dispatcher["schedule_client"] = schedule_client
+        dispatcher["reminders"] = reminders
 
     app = web.Application(client_max_size=1024 * 1024)
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
+    if service is not None:
+        register_account_pages(app, service)
 
     async def resources(application: web.Application):
         try:
+            if service is not None:
+                await service.store.initialize()
             await bot.set_webhook(
                 url=settings.base_url + WEBHOOK_PATH,
                 secret_token=settings.secret,
@@ -151,7 +182,8 @@ def create_app(settings: CloudSettings) -> web.Application:
             logging.info("Бот запущен в режиме webhook. Утренняя рассылка выключена.")
             yield
         finally:
-            await schedule_client.close()
+            if schedule_client is not None:
+                await schedule_client.close()
             await bot.session.close()
 
     app.cleanup_ctx.append(resources)
@@ -167,6 +199,7 @@ def create_app(settings: CloudSettings) -> web.Application:
 
 def main() -> None:
     load_dotenv(PROJECT_DIR / ".env")
+    load_dotenv(PROJECT_DIR / ".env.neon")
     settings = CloudSettings.from_env()
     web.run_app(
         create_app(settings),

@@ -112,8 +112,8 @@ def format_lesson_blocks(lessons: list[Lesson]) -> list[str]:
     return blocks
 
 
-def format_day(day: date, lessons: list[Lesson], label: str) -> list[str]:
-    heading = f"📅 {label}, {day:%d.%m.%Y}\nГруппа 1241"
+def format_day(day: date, lessons: list[Lesson], label: str, group: str = "1241") -> list[str]:
+    heading = f"📅 {label}, {day:%d.%m.%Y}\nГруппа {group}"
     if not lessons:
         hint = "можно спать дальше!" if label == "Сегодня" else "можно выспаться!"
         return [heading + f"\n\n😴 {label} пар нет — {hint}"]
@@ -128,9 +128,9 @@ def format_day(day: date, lessons: list[Lesson], label: str) -> list[str]:
     return messages
 
 
-def format_week(start: date, schedule: dict[date, list[Lesson]]) -> list[str]:
+def format_week(start: date, schedule: dict[date, list[Lesson]], group: str = "1241") -> list[str]:
     end = start + timedelta(days=6)
-    heading = f"📆 Неделя {start:%d.%m.%Y}–{end:%d.%m.%Y}\nГруппа 1241"
+    heading = f"📆 Неделя {start:%d.%m.%Y}–{end:%d.%m.%Y}\nГруппа {group}"
     if not any(schedule.values()):
         return [heading + "\n\n😴 На этой неделе пар нет — можно отдыхать!"]
     messages = []
@@ -140,7 +140,7 @@ def format_week(start: date, schedule: dict[date, list[Lesson]]) -> list[str]:
         label = WEEKDAYS[day.weekday()]
         lessons = schedule[day]
         if lessons:
-            blocks = format_day(day, lessons, label)
+            blocks = format_day(day, lessons, label, group)
         else:
             blocks = [f"📅 {label}, {day:%d.%m.%Y}\n😴 Пар нет"]
         for block in blocks:
