@@ -21,3 +21,5 @@ services:
         sync: false
       - key: CREDENTIALS_KEY
         sync: false
+      - key: ADMIN_TELEGRAM_ID
+        sync: false

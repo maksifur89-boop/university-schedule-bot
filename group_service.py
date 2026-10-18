@@ -148,3 +148,11 @@ class GroupService:
                     if key[0] == group.id:
                         del self.cache[key]
             return changed
+
+    async def admin_reset(self, group_id: int, revision: int) -> None:
+        async with self.lock(group_id):
+            if not await self.store.admin_reset(group_id, revision):
+                raise ChangedConnection("Подключение уже изменилось. Открой группу заново.")
+            for key in list(self.cache):
+                if key[0] == group_id:
+                    del self.cache[key]

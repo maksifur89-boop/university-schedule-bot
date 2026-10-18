@@ -194,3 +194,42 @@ class Store:
                 (group.id, group.revision, telegram_id),
             )
             return await cursor.fetchone() is not None
+
+    async def admin_groups(self, page: int = 0) -> dict:
+        async with self.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT count(*) AS group_count, "
+                "count(*) FILTER (WHERE credentials IS NOT NULL) AS connected_count, "
+                "(SELECT count(*) FROM schedule_bot.users) AS user_count "
+                "FROM schedule_bot.groups"
+            )
+            overview = await cursor.fetchone()
+            pages = max(1, (overview["group_count"] + 7) // 8)
+            page = min(max(0, page), pages - 1)
+            cursor = await connection.execute(
+                "SELECT g.id, g.number, g.credentials IS NOT NULL AS connected, "
+                "g.failure_kind, g.revision, count(u.telegram_id) AS user_count "
+                "FROM schedule_bot.groups g LEFT JOIN schedule_bot.users u ON u.group_id = g.id "
+                "GROUP BY g.id ORDER BY g.number, g.id LIMIT 8 OFFSET %s", (page * 8,)
+            )
+            return {**overview, "page": page, "pages": pages, "groups": await cursor.fetchall()}
+
+    async def admin_group(self, group_id: int) -> dict | None:
+        async with self.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT g.id, g.number, g.credentials IS NOT NULL AS connected, "
+                "g.failure_kind, g.revision, g.last_success_at, count(u.telegram_id) AS user_count "
+                "FROM schedule_bot.groups g LEFT JOIN schedule_bot.users u ON u.group_id = g.id "
+                "WHERE g.id = %s GROUP BY g.id", (group_id,)
+            )
+            return await cursor.fetchone()
+
+    async def admin_reset(self, group_id: int, revision: int) -> bool:
+        async with self.connection() as connection:
+            cursor = await connection.execute(
+                "UPDATE schedule_bot.groups SET credentials = NULL, university_id = NULL, "
+                "owner_id = NULL, revision = revision + 1, failure_kind = NULL, failed_at = NULL "
+                "WHERE id = %s AND revision = %s AND credentials IS NOT NULL RETURNING id",
+                (group_id, revision),
+            )
+            return await cursor.fetchone() is not None

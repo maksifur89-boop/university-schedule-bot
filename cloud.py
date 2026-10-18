@@ -35,11 +35,15 @@ class CloudSettings:
     port: int = 10000
     database_url: str = field(default="", repr=False)
     credentials_key: str = field(default="", repr=False)
+    admin_telegram_id: int | None = None
 
     @classmethod
     def from_env(cls) -> "CloudSettings":
         database_url = os.getenv("DATABASE_URL", "").strip()
         credentials_key = os.getenv("CREDENTIALS_KEY", "").strip()
+        admin_value = os.getenv("ADMIN_TELEGRAM_ID", "").strip()
+        if admin_value and re.fullmatch(r"[1-9][0-9]{0,17}", admin_value) is None:
+            raise SystemExit("ADMIN_TELEGRAM_ID должен содержать положительный числовой Telegram ID.")
         if bool(database_url) != bool(credentials_key):
             raise SystemExit("Для групп нужны обе переменные: DATABASE_URL и CREDENTIALS_KEY.")
         if database_url:
@@ -104,6 +108,7 @@ class CloudSettings:
             port=port,
             database_url=database_url,
             credentials_key=credentials_key,
+            admin_telegram_id=int(admin_value) if admin_value else None,
         )
 
 
@@ -150,7 +155,7 @@ def create_app(settings: CloudSettings) -> web.Application:
     service = None
     if settings.database_url:
         service = GroupService(Store(settings.database_url), settings.credentials_key, settings.base_url)
-        dispatcher.include_router(create_router(service))
+        dispatcher.include_router(create_router(service, settings.admin_telegram_id))
     else:
         schedule_client = UniversityClient(settings.username, settings.password)
         reminders = MorningReminders(

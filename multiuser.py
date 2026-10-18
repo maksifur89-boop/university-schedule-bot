@@ -10,6 +10,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
+from admin_panel import register_admin_handlers
 from group_service import ChangedConnection, ConnectionNeeded, GroupService
 from main import MOSCOW_TIMEZONE, format_day, format_week
 from storage import Group, StorageError
@@ -113,11 +114,12 @@ async def show_group(message: Message, service: GroupService, telegram_id: int |
     )
 
 
-def create_router(service: GroupService) -> Router:
+def create_router(service: GroupService, admin_id: int | None = None) -> Router:
     router = Router(name="groups")
     middleware = UserMiddleware()
     router.message.outer_middleware(middleware)
     router.callback_query.outer_middleware(middleware)
+    register_admin_handlers(router, service, admin_id)
 
     @router.message(CommandStart())
     async def start(message: Message):
