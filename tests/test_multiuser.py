@@ -226,6 +226,7 @@ class AccountPageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('type="password"', content)
         self.assertIn('name="consent"', content)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(response.headers["Referrer-Policy"], "same-origin")
         self.assertIn("default-src 'none'", response.headers["Content-Security-Policy"])
 
     async def test_expired_link(self):
@@ -234,6 +235,22 @@ class AccountPageTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cross_site_submission_rejected(self):
         response = await self.client.post("/connect", data={"token": "fixture"}, headers={"Origin": "https://attacker.example"})
+        self.assertEqual(response.status, 403)
+        self.service.attach.assert_not_awaited()
+
+    async def test_same_origin_submission_succeeds(self):
+        response = await self.client.post(
+            "/connect", headers={"Origin": "https://bot.example"},
+            data={"token": "fixture", "username": "test", "password": "fixture", "consent": "yes"},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertIn("Группа подключена", await response.text())
+        self.service.attach.assert_awaited_once()
+
+    async def test_null_origin_still_rejected(self):
+        response = await self.client.post(
+            "/connect", data={"token": "fixture"}, headers={"Origin": "null"}
+        )
         self.assertEqual(response.status, 403)
         self.service.attach.assert_not_awaited()
 
