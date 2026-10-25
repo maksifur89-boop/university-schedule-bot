@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from aiogram import Bot, Dispatcher
@@ -8,7 +8,7 @@ from aiogram.methods import SendMessage
 from cryptography.fernet import Fernet
 
 from group_service import GroupService
-from main import MOSCOW_TIMEZONE, format_day, format_week
+from main import MOSCOW_TIMEZONE, format_day, format_week, schedule_week_start
 from multiuser import KEYBOARD, create_router, parse_schedule_date
 from storage import Group, Store
 from test_admin import Session
@@ -36,6 +36,25 @@ class DateParserTests(unittest.TestCase):
         for text in ("", "0", "32", "1241", "31.04", "29.02.2027", "28/10", "31.12.9999"):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_schedule_date(text, TODAY)
+
+
+class ScheduleWeekTests(unittest.TestCase):
+    def test_both_weeks_follow_calendar_with_sunday_rollover(self):
+        for current, expected in (
+            (date(2026, 10, 24), date(2026, 10, 19)),
+            (date(2026, 10, 25), date(2026, 10, 26)),
+            (date(2026, 10, 26), date(2026, 10, 26)),
+            (date(2026, 10, 28), date(2026, 10, 26)),
+            (date(2026, 10, 31), date(2026, 10, 26)),
+            (date(2026, 11, 1), date(2026, 11, 2)),
+            (date(2026, 12, 27), date(2026, 12, 28)),
+            (date(2026, 12, 31), date(2026, 12, 28)),
+            (date(2027, 1, 3), date(2027, 1, 4)),
+        ):
+            with self.subTest(today=current):
+                self.assertEqual(schedule_week_start(current), expected)
+                self.assertEqual(schedule_week_start(current, next_week=True),
+                                 expected + timedelta(days=7))
 
 
 class ScheduleDateRouterTests(unittest.IsolatedAsyncioTestCase):
@@ -73,7 +92,7 @@ class ScheduleDateRouterTests(unittest.IsolatedAsyncioTestCase):
         }}
         with patch("multiuser.monotonic", return_value=100 + self.sequence * 2), \
                 patch("multiuser.datetime") as clock:
-            clock.now.return_value = self.now
+            clock.now.side_effect = lambda zone: self.now.astimezone(zone)
             await self.dispatcher.feed_raw_update(self.bot, update)
             if clock.now.called:
                 clock.now.assert_called_with(MOSCOW_TIMEZONE)
@@ -153,7 +172,7 @@ class ScheduleDateRouterTests(unittest.IsolatedAsyncioTestCase):
         self.service.week.assert_not_awaited()
 
     async def test_next_week_on_sunday_monday_and_year_boundary(self):
-        for current, expected in ((date(2026, 10, 25), date(2026, 10, 26)),
+        for current, expected in ((date(2026, 10, 25), date(2026, 11, 2)),
                                   (date(2026, 10, 26), date(2026, 11, 2)),
                                   (date(2026, 12, 31), date(2027, 1, 4))):
             with self.subTest(today=current):
@@ -165,12 +184,47 @@ class ScheduleDateRouterTests(unittest.IsolatedAsyncioTestCase):
                 end = expected + timedelta(days=6)
                 self.assertIn(f"{expected:%d.%m.%Y}–{end:%d.%m.%Y}", self.texts())
 
+    async def test_current_week_recalculates_without_restarting_bot(self):
+        for current, expected in ((date(2026, 10, 24), date(2026, 10, 19)),
+                                  (date(2026, 10, 25), date(2026, 10, 26)),
+                                  (date(2026, 10, 26), date(2026, 10, 26)),
+                                  (date(2026, 11, 1), date(2026, 11, 2))):
+            with self.subTest(today=current):
+                self.now = datetime(current.year, current.month, current.day, 0, 1,
+                                    tzinfo=MOSCOW_TIMEZONE)
+                self.service.week.reset_mock()
+                await self.send("На неделю")
+                self.service.week.assert_awaited_once_with(GROUP, expected)
+                end = expected + timedelta(days=6)
+                self.assertIn(f"{expected:%d.%m.%Y}–{end:%d.%m.%Y}", self.texts())
+
+    async def test_switch_uses_moscow_midnight_even_while_server_is_saturday(self):
+        self.now = datetime(2026, 10, 24, 20, 59, tzinfo=timezone.utc)
+        await self.send("На неделю")
+        self.service.week.assert_awaited_with(GROUP, date(2026, 10, 19))
+        self.now = datetime(2026, 10, 24, 21, 1, tzinfo=timezone.utc)
+        await self.send("На неделю")
+        self.service.week.assert_awaited_with(GROUP, date(2026, 10, 26))
+        await self.send("На следующую неделю")
+        self.service.week.assert_awaited_with(GROUP, date(2026, 11, 2))
+
+    async def test_sunday_day_buttons_still_show_exact_date(self):
+        await self.send("На сегодня")
+        self.service.week.assert_awaited_with(GROUP, date(2026, 10, 25))
+        self.assertIn("Сегодня, 25.10.2026", self.texts())
+        await self.send("На завтра")
+        self.service.week.assert_awaited_with(GROUP, date(2026, 10, 26))
+        await self.send("На дату")
+        await self.send("25")
+        self.service.week.assert_awaited_with(GROUP, date(2026, 10, 25))
+        self.assertIn("В этот день, 25.10.2026", self.texts())
+
     async def test_empty_next_week_has_correct_label(self):
-        start = date(2026, 10, 26)
+        start = date(2026, 11, 2)
         self.service.week.side_effect = None
         self.service.week.return_value = {start + timedelta(days=i): [] for i in range(7)}
         await self.send("На следующую неделю")
-        self.assertIn("26.10.2026–01.11.2026", self.texts())
+        self.assertIn("02.11.2026–08.11.2026", self.texts())
         self.assertIn("пар нет", self.texts())
         self.assertNotIn("На этой неделе", self.texts())
 
@@ -179,6 +233,28 @@ class ScheduleDateRouterTests(unittest.IsolatedAsyncioTestCase):
         await self.send("На дату")
         self.assertIn("пока не подключена", self.texts())
         self.service.week.assert_not_awaited()
+
+
+class WeekCacheTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_week_does_not_reuse_previous_week_and_sunday_day_stays_available(self):
+        store = AsyncMock(spec=Store)
+        store.get_group.return_value = GROUP
+        store.mark_result.return_value = True
+        service = GroupService(store, Fernet.generate_key().decode(), "https://bot.example")
+
+        async def fetch(group, start):
+            return {start + timedelta(days=i): [] for i in range(7)}
+
+        service._fetch = AsyncMock(side_effect=fetch)
+        previous = await service.week(GROUP, date(2026, 10, 24))
+        current = await service.week(GROUP, schedule_week_start(TODAY))
+        sunday = await service.week(GROUP, TODAY)
+        monday = await service.week(GROUP, date(2026, 10, 26))
+        self.assertEqual(min(previous), date(2026, 10, 19))
+        self.assertEqual(min(current), date(2026, 10, 26))
+        self.assertIs(sunday, previous)
+        self.assertIs(monday, current)
+        self.assertEqual(service._fetch.await_count, 2)
 
 
 class TeacherFormattingTests(unittest.TestCase):
