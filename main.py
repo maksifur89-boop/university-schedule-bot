@@ -90,6 +90,7 @@ def format_lesson_blocks(lessons: list[Lesson]) -> list[str]:
     previous_start = None
     previous_end = None
     for lesson in sorted(lessons, key=lambda item: item.starts_at):
+        teacher_icon = "👹" if "томашевск" in lesson.teacher.casefold() else "👤"
         if lesson.starts_at != previous_start:
             if previous_end is not None:
                 for starts_at, ends_at in BELL_TIMES:
@@ -105,7 +106,7 @@ def format_lesson_blocks(lessons: list[Lesson]) -> list[str]:
             f"🕒 {pair_number}-я пара · {lesson.starts_at}–{lesson.ends_at}\n"
             f"🎓 {lesson.lesson_type}\n"
             f"📍 {lesson.location}\n"
-            f"👤 {lesson.teacher}"
+            f"{teacher_icon} {lesson.teacher}"
         )
         previous_start = lesson.starts_at
         previous_end = max(previous_end or lesson.ends_at, lesson.ends_at)
@@ -132,7 +133,7 @@ def format_week(start: date, schedule: dict[date, list[Lesson]], group: str = "1
     end = start + timedelta(days=6)
     heading = f"📆 Неделя {start:%d.%m.%Y}–{end:%d.%m.%Y}\nГруппа {group}"
     if not any(schedule.values()):
-        return [heading + "\n\n😴 На этой неделе пар нет — можно отдыхать!"]
+        return [heading + "\n\n😴 В выбранную неделю пар нет — можно отдыхать!"]
     messages = []
     current = heading
     for offset in range(7):

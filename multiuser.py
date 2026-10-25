@@ -2,11 +2,13 @@ import asyncio
 import logging
 import re
 from collections import OrderedDict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from time import monotonic
 
 from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
@@ -20,10 +22,30 @@ from university import AccountError, ScheduleError
 KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="На сегодня"), KeyboardButton(text="На завтра")],
-        [KeyboardButton(text="На неделю"), KeyboardButton(text="Моя группа")],
+        [KeyboardButton(text="На неделю"), KeyboardButton(text="На следующую неделю")],
+        [KeyboardButton(text="На дату"), KeyboardButton(text="Моя группа")],
     ], resize_keyboard=True, is_persistent=True,
     input_field_placeholder="Выбери расписание",
 )
+
+
+class ScheduleInput(StatesGroup):
+    day = State()
+    group = State()
+
+
+def parse_schedule_date(text: str, today: date) -> date:
+    match = re.fullmatch(r"([0-9]{1,2})(?:\.([0-9]{1,2})(?:\.([0-9]{4}))?)?", text.strip())
+    if match is None:
+        raise ValueError("Отправь число, дату ДД.ММ или ДД.ММ.ГГГГ.")
+    day, month, year = match.groups()
+    try:
+        chosen = date(int(year) if year else today.year,
+                      int(month) if month else today.month, int(day))
+        chosen + timedelta(days=6 - chosen.weekday())
+        return chosen
+    except (ValueError, OverflowError):
+        raise ValueError("Такой даты нет. Проверь число, месяц и год.") from None
 
 
 class UserMiddleware(BaseMiddleware):
@@ -122,37 +144,50 @@ def create_router(service: GroupService, admin_id: int | None = None) -> Router:
     register_admin_handlers(router, service, admin_id)
 
     @router.message(CommandStart())
-    async def start(message: Message):
+    async def start(message: Message, state: FSMContext):
+        await state.clear()
         await message.answer("Привет! Я помогу с расписанием твоей группы.", reply_markup=KEYBOARD)
         await show_group(message, service)
 
     @router.message(Command("group"))
-    async def choose(message: Message):
+    async def choose(message: Message, state: FSMContext):
+        await state.clear()
+        await state.set_state(ScheduleInput.group)
         await message.answer("Отправь номер учебной группы, например 1241.")
 
     @router.message(F.text == "Моя группа")
-    async def current(message: Message):
+    async def current(message: Message, state: FSMContext):
+        await state.clear()
         await show_group(message, service)
 
     @router.message(Command("disconnect"))
-    async def disconnect(message: Message):
+    async def disconnect(message: Message, state: FSMContext):
+        await state.clear()
         if await service.disconnect_owner(message.from_user.id):
             await message.answer("Твоё подключение удалено. Участники группы смогут привязать новый аккаунт.")
         else:
             await message.answer("У выбранной группы нет подключения, которое принадлежит тебе.")
 
     @router.message(Command("stop"))
-    async def stop(message: Message):
+    async def stop(message: Message, state: FSMContext):
+        await state.clear()
         await message.answer("Утренняя рассылка выключена.", reply_markup=KEYBOARD)
 
-    async def send_schedule(message: Message, action: str):
+    @router.message(Command("cancel"))
+    async def cancel(message: Message, state: FSMContext):
+        await state.clear()
+        await message.answer("Ввод отменён. Выбери нужную кнопку.", reply_markup=KEYBOARD)
+
+    async def send_schedule(message: Message, action: str, chosen_day: date | None = None):
         group = await service.store.user_group(message.from_user.id)
         if group is None or group.credentials is None:
             await show_group(message, service)
             return
-        day = datetime.now(MOSCOW_TIMEZONE).date()
+        day = chosen_day or datetime.now(MOSCOW_TIMEZONE).date()
         if action == "На завтра":
             day += timedelta(days=1)
+        elif action == "На следующую неделю":
+            day += timedelta(days=7 - day.weekday())
         await message.answer("Смотрю расписание…")
         try:
             schedule = await service.week(group, day)
@@ -173,21 +208,39 @@ def create_router(service: GroupService, admin_id: int | None = None) -> Router:
                 reply_markup=KEYBOARD,
             )
             return
-        if action == "На неделю":
+        if action in {"На неделю", "На следующую неделю"}:
             start_day = day - timedelta(days=day.weekday())
             messages = format_week(start_day, schedule, group.number)
         else:
-            label = "Завтра" if action == "На завтра" else "Сегодня"
+            label = {"На сегодня": "Сегодня", "На завтра": "Завтра", "На дату": "В этот день"}[action]
             messages = format_day(day, schedule[day], label, group.number)
         for text in messages:
             await message.answer(text, reply_markup=KEYBOARD)
 
-    @router.message(F.text.in_({"На сегодня", "На завтра", "На неделю"}))
-    async def schedule(message: Message):
+    @router.message(F.text.in_({"На сегодня", "На завтра", "На неделю", "На следующую неделю"}))
+    async def schedule(message: Message, state: FSMContext):
+        await state.clear()
         await send_schedule(message, message.text)
 
+    @router.message(F.text == "На дату")
+    async def request_date(message: Message, state: FSMContext):
+        await state.clear()
+        group = await service.store.user_group(message.from_user.id)
+        if group is None or group.credentials is None:
+            await show_group(message, service)
+            return
+        await state.set_state(ScheduleInput.day)
+        today = datetime.now(MOSCOW_TIMEZONE).date()
+        await message.answer(
+            f"Отправь число от 1 до 31 — покажу день текущего месяца ({today:%m.%Y}).\n"
+            f"Или введи дату: {today:%d.%m} либо {today:%d.%m.%Y}.\n"
+            "Дата без года относится к текущему году. Отмена: /cancel",
+            reply_markup=KEYBOARD,
+        )
+
     @router.message(Command("test_morning"))
-    async def morning(message: Message):
+    async def morning(message: Message, state: FSMContext):
+        await state.clear()
         await message.answer("🧪 Проверка утреннего сообщения. Автоматическая рассылка выключена.")
         await send_schedule(message, "На сегодня")
 
@@ -216,13 +269,34 @@ def create_router(service: GroupService, admin_id: int | None = None) -> Router:
         else:
             await callback.message.answer("✅ Подключение снова работает. Нажми нужную кнопку расписания.")
 
+    @router.message(ScheduleInput.day, F.text)
+    async def selected_date(message: Message, state: FSMContext):
+        try:
+            chosen = parse_schedule_date(message.text, datetime.now(MOSCOW_TIMEZONE).date())
+        except ValueError as error:
+            today = datetime.now(MOSCOW_TIMEZONE).date()
+            await message.answer(
+                f"{error}\nНапример: {today.day}, {today:%d.%m} или {today:%d.%m.%Y}. Отмена: /cancel"
+            )
+            return
+        await state.clear()
+        await send_schedule(message, "На дату", chosen)
+
     @router.message(F.text)
-    async def group_number(message: Message):
+    async def group_number(message: Message, state: FSMContext):
         text = message.text.strip()
+        if re.fullmatch(r"[0-9]{1,2}", text) and await state.get_state() != ScheduleInput.group.state:
+            group = await service.store.user_group(message.from_user.id)
+            if group is not None:
+                # Число дня не меняет группу, даже если сервер успел перезапуститься.
+                await state.set_state(ScheduleInput.day)
+                await selected_date(message, state)
+                return
         if not re.fullmatch(r"\d{2,12}(?:[-/][\w]{1,16})?", text):
             await message.answer("Выбери кнопку расписания или отправь номер группы, например 1241.")
             return
         group = await service.store.choose_group(message.from_user.id, text)
+        await state.clear()
         await message.answer(f"Выбрана группа {group.number}.", reply_markup=KEYBOARD)
         await show_group(message, service)
 
