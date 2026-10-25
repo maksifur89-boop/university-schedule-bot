@@ -14,7 +14,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from admin_panel import register_admin_handlers
 from group_service import ChangedConnection, ConnectionNeeded, GroupService
-from main import MOSCOW_TIMEZONE, format_day, format_week
+from main import MOSCOW_TIMEZONE, format_day, format_week, schedule_week_start
 from storage import Group, StorageError
 from university import AccountError, ScheduleError
 
@@ -186,8 +186,8 @@ def create_router(service: GroupService, admin_id: int | None = None) -> Router:
         day = chosen_day or datetime.now(MOSCOW_TIMEZONE).date()
         if action == "На завтра":
             day += timedelta(days=1)
-        elif action == "На следующую неделю":
-            day += timedelta(days=7 - day.weekday())
+        elif action in {"На неделю", "На следующую неделю"}:
+            day = schedule_week_start(day, next_week=action == "На следующую неделю")
         await message.answer("Смотрю расписание…")
         try:
             schedule = await service.week(group, day)
@@ -209,8 +209,7 @@ def create_router(service: GroupService, admin_id: int | None = None) -> Router:
             )
             return
         if action in {"На неделю", "На следующую неделю"}:
-            start_day = day - timedelta(days=day.weekday())
-            messages = format_week(start_day, schedule, group.number)
+            messages = format_week(day, schedule, group.number)
         else:
             label = {"На сегодня": "Сегодня", "На завтра": "Завтра", "На дату": "В этот день"}[action]
             messages = format_day(day, schedule[day], label, group.number)

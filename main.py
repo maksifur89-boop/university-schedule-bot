@@ -129,6 +129,16 @@ def format_day(day: date, lessons: list[Lesson], label: str, group: str = "1241"
     return messages
 
 
+def schedule_week_start(day: date, *, next_week: bool = False) -> date:
+    """В воскресенье недельные кнопки уже ориентируются на предстоящий понедельник."""
+    start = day - timedelta(days=day.weekday())
+    if day.weekday() == 6:
+        start += timedelta(days=7)
+    if next_week:
+        start += timedelta(days=7)
+    return start
+
+
 def format_week(start: date, schedule: dict[date, list[Lesson]], group: str = "1241") -> list[str]:
     end = start + timedelta(days=6)
     heading = f"📆 Неделя {start:%d.%m.%Y}–{end:%d.%m.%Y}\nГруппа {group}"
@@ -175,7 +185,7 @@ async def day_schedule_handler(message: Message, schedule_client: UniversityClie
 @router.message(F.text == "На неделю")
 async def week_schedule_handler(message: Message, schedule_client: UniversityClient) -> None:
     today = datetime.now(MOSCOW_TIMEZONE).date()
-    start = today - timedelta(days=today.weekday())
+    start = schedule_week_start(today)
     end = start + timedelta(days=6)
     await message.answer("Смотрю расписание на неделю на сайте вуза…")
     try:
