@@ -42,7 +42,12 @@ class Lesson:
 
 def check_url(url: str) -> None:
     parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
+    try:
+        valid_port = parsed.port in (None, 443)
+    except ValueError:
+        valid_port = False
+    if (parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS
+            or parsed.username is not None or parsed.password is not None or not valid_port):
         raise ScheduleError("Сайт перенаправил запрос на неизвестный адрес.")
 
 
@@ -89,18 +94,39 @@ class UniversityClient:
         raise ScheduleError("Слишком много перенаправлений при входе.")
 
     async def submit_form(self, response: httpx.Response, form) -> httpx.Response:
-        fields = {
-            element["name"]: element.get("value", "")
-            for element in form.select("input[name]")
-        }
-        if form.select_one('input[type="password"]'):
-            fields.update(username=self.username, password=self.password)
         if form.get("method", "get").lower() != "post":
             raise ScheduleError("На сайте изменилась форма входа.")
         target = urljoin(str(response.url), form.get("action", ""))
-        if form.select_one('input[type="password"]') and urlparse(target).hostname != "idp.ieml.ru":
-            raise ScheduleError("Неожиданный адрес отправки формы входа.")
+        check_url(target)
+        fields = {
+            element["name"]: element.get("value", "")
+            for element in form.select("input[name]")
+            if not element.has_attr("disabled")
+            and element.get("type", "text").lower() not in {"button", "reset", "image", "file"}
+            and (element.get("type", "text").lower() not in {"checkbox", "radio"}
+                 or element.has_attr("checked"))
+        }
+        if form.select_one('input[type="password"]'):
+            username_field, password_field = self.login_field_names(response, form)
+            fields[username_field] = self.username
+            fields[password_field] = self.password
         return await self.request(target, "POST", fields)
+
+    def login_field_names(self, response: httpx.Response, form) -> tuple[str, str]:
+        target = urlparse(urljoin(str(response.url), form.get("action", "")))
+        check_url(target.geturl())
+        if response.url.host == target.hostname == "idp.ieml.ru":
+            names = "username", "password"
+        elif (response.url.host == target.hostname == "idis.ieml.ru"
+              and target.path == "/Education/LoginCheck"):
+            names = "j_username", "j_password"
+        else:
+            raise ScheduleError("Неожиданный адрес отправки формы входа.")
+        username_field, password_field = names
+        if (form.select_one(f'input[name="{username_field}"]') is None
+                or form.select_one(f'input[name="{password_field}"][type="password"]') is None):
+            raise ScheduleError("На сайте изменилась форма входа.")
+        return names
 
     async def login(self) -> None:
         if not self.username or not self.password:
@@ -136,8 +162,7 @@ class UniversityClient:
                     continue
                 raise ScheduleError("Не удалось войти в кабинет вуза.")
             if form.select_one('input[type="password"]'):
-                if response.url.host != "idp.ieml.ru":
-                    raise ScheduleError("Неожиданный адрес формы входа.")
+                self.login_field_names(response, form)
                 if password_submitted:
                     raise AccountError("Сайт отклонил логин или пароль от кабинета вуза.")
                 password_submitted = True
@@ -172,7 +197,8 @@ class UniversityClient:
                 }
                 url = str(httpx.URL(BASE_URL + "GenerateScheduleLessons", params=parameters))
                 response = await self.request(url)
-                if response.url.host != "idis.ieml.ru":
+                if (response.url.host != "idis.ieml.ru"
+                        or BeautifulSoup(response.text, "html.parser").select_one('input[type="password"]')):
                     self.authenticated = False
                     await self.login()
                     response = await self.request(url)
